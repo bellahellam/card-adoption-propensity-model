@@ -1,0 +1,86 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Tokenized Parquet files under the raw S3 data lake prefix. Bronze owns the physical read contract."
+    tables:
+      - name: transactions
+        description: "Tokenized synthetic transaction data stored with year/month/day Hive partitions."
+        config:
+          external_location: "read_parquet('s3://{{ env_var('S3_BUCKET') }}/raw/transactions/year=*/month=*/day=*/transactions.parquet', hive_partitioning = true)"
+      - name: customer_labels
+        description: "Synthetic adoption labels used only by model training."
+        config:
+          external_location: "read_parquet('s3://{{ env_var('S3_BUCKET') }}/raw/customer_labels/year=*/month=*/day=*/customer_labels.parquet', hive_partitioning = true)"
+  - name: scoring
+    description: "Batch-scoring output consumed by the post-scoring campaign mart."
+    tables:
+      - name: campaign_segments
+        config:
+          external_location: "read_parquet('s3://{{ env_var('S3_BUCKET') }}/scores/weekly/year=*/month=*/day=*/campaign_segments.parquet', hive_partitioning = true)"
+
+models:
+  - name: bronze_transactions
+    description: "Schema-conformed, tokenized raw transaction records."
+    columns:
+      - name: customer_token
+        data_tests: [not_null]
+      - name: transaction_id
+        data_tests: [not_null, unique]
+      - name: amount
+        data_tests: [not_null, positive]
+  - name: silver_transactions
+    description: "Cleaned transactions with normalized currencies and categories."
+    columns:
+      - name: customer_token
+        data_tests: [not_null]
+      - name: transaction_id
+        data_tests: [not_null, unique]
+      - name: channel_clean
+        data_tests:
+          - accepted_values:
+              values: [digital, branch, atm, agent, unknown]
+      - name: transaction_type_clean
+        data_tests:
+          - accepted_values:
+              values: [purchase, transfer, withdrawal, deposit, bill_pay, other]
+      - name: amount_usd
+        data_tests: [positive]
+  - name: gold_customer_features
+    description: "Daily customer-level rolling transaction features."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [customer_token, feature_date]
+    columns:
+      - name: customer_token
+        data_tests: [not_null]
+      - name: feature_date
+        data_tests: [not_null]
+      - name: digital_ratio_30d
+        data_tests:
+          - accepted_range:
+              min_value: 0
+              max_value: 1
+  - name: features_transactional
+    description: "Latest scoring-ready feature snapshot."
+    columns:
+      - name: customer_token
+        data_tests: [not_null, unique]
+      - name: engagement_segment
+        data_tests:
+          - accepted_values:
+              values: [power_digital, active_digital, casual, dormant]
+  - name: mart_campaign_segments
+    description: "Campaign-ready scored customers, materialized after batch scoring."
+    columns:
+      - name: customer_token
+        data_tests: [not_null, unique]
+      - name: propensity_score
+        data_tests:
+          - accepted_range:
+              min_value: 0
+              max_value: 1
+      - name: campaign_segment
+        data_tests:
+          - accepted_values:
+              values: [TARGET_PREMIUM, TARGET_STANDARD, NURTURE, EXCLUDE]

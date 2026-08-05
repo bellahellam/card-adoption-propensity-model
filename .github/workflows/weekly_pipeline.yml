@@ -1,0 +1,148 @@
+name: Weekly Visa card-adoption propensity pipeline
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  S3_BUCKET: ${{ secrets.S3_BUCKET }}
+  ECR_REPOSITORY_URL: ${{ secrets.ECR_REPOSITORY_URL }}
+  MLFLOW_TRACKING_URI: ./mlruns
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: python -m pip install -r requirements.txt
+      - name: Generate and tokenize synthetic data
+        env:
+          TOKEN_KEY: ${{ secrets.TOKEN_KEY }}
+        run: python src/ingestion/generate_and_tokenize.py --run-date "$(date -u +%F)"
+
+  transform:
+    needs: ingest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/duckdb
+          key: duckdb-httpfs-${{ runner.os }}-${{ hashFiles('dbt_project/packages.yml') }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: python -m pip install -r requirements.txt
+      - name: Build dbt bronze through features models and data tests
+        run: RUN_DATE="$(date -u +%F)" ./scripts/run_dbt.sh
+
+  train:
+    needs: transform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: mlruns
+          key: mlflow-${{ runner.os }}-${{ github.run_id }}
+      - uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: model-cache-${{ runner.os }}-${{ github.run_id }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: python -m pip install -r requirements.txt
+      - name: Train calibrated XGBoost model and publish model card
+        run: python src/training/train.py
+
+  score:
+    needs: train
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: model-cache-${{ runner.os }}-${{ github.run_id }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/duckdb
+          key: duckdb-httpfs-${{ runner.os }}-${{ hashFiles('dbt_project/packages.yml') }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: python -m pip install -r requirements.txt
+      - name: Score latest customer features
+        run: python src/scoring/batch_score.py --score-date "$(date -u +%F)"
+      - name: Build post-scoring campaign mart
+        run: RUN_DATE="$(date -u +%F)" DBT_SELECTION="+mart_campaign_segments" ./scripts/run_dbt.sh
+
+  deploy_api:
+    needs: train
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and publish the Python 3.11 Lambda image
+        run: |
+          docker build --platform linux/amd64 --tag "${ECR_REPOSITORY_URL}:${GITHUB_SHA}" src/api
+          docker push "${ECR_REPOSITORY_URL}:${GITHUB_SHA}"
+      - name: Update the Lambda to refresh its S3-backed model on new containers
+        run: aws lambda update-function-code --function-name visa-card-propensity-score --image-uri "${ECR_REPOSITORY_URL}:${GITHUB_SHA}" --publish
+
+  notify:
+    if: always()
+    needs: [ingest, transform, train, score, deploy_api]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post pipeline result to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PIPELINE_STATUS: ${{ needs.score.result }}
+        run: |
+          if [[ -n "${SLACK_WEBHOOK_URL}" ]]; then
+            curl --fail --silent --show-error --request POST "${SLACK_WEBHOOK_URL}" \
+              --header 'content-type: application/json' \
+              --data "{\"text\":\"Visa propensity weekly pipeline: ${PIPELINE_STATUS} (run ${GITHUB_RUN_ID})\"}"
+          else
+            echo "SLACK_WEBHOOK_URL is not configured; skipping Slack notification."
+          fi

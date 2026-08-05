@@ -1,0 +1,33 @@
+name: visa_propensity
+version: "1.0.0"
+config-version: 2
+profile: duckdb_s3
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages", "logs"]
+
+models:
+  visa_propensity:
+    +materialized: external
+    +format: parquet
+    bronze:
+      +tags: ["bronze"]
+    silver:
+      +tags: ["silver"]
+    gold:
+      +tags: ["gold"]
+    features:
+      +tags: ["features"]
+    marts:
+      +tags: ["marts"]
+
+seeds:
+  visa_propensity:
+    merchant_category_mapping:
+      +column_types:
+        merchant_mcc: integer
+

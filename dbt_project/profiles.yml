@@ -1,0 +1,16 @@
+duckdb_s3:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', '/tmp/visa_propensity.duckdb') }}"
+      threads: 4
+      extensions:
+        - httpfs
+        - parquet
+      secrets:
+        - type: s3
+          key_id: "{{ env_var('AWS_ACCESS_KEY_ID') }}"
+          secret: "{{ env_var('AWS_SECRET_ACCESS_KEY') }}"
+          session_token: "{{ env_var('AWS_SESSION_TOKEN', '') }}"
+          region: "{{ env_var('AWS_REGION', 'us-east-1') }}"
