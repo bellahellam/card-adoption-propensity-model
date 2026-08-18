@@ -12,6 +12,8 @@ from typing import Any, Mapping
 import boto3
 import joblib
 import pandas as pd
+import numpy as np
+import xgboost as xgb
 from botocore.exceptions import BotoCoreError, ClientError
 
 
