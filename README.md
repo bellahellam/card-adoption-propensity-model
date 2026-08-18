@@ -1,6 +1,6 @@
 # Visa Card Adoption Propensity System
 
-This repository is an end-to-end, low-cost POC for weekly Visa card-adoption propensity scoring. It uses S3 as the data lake, dbt-duckdb for transformations, GitHub Actions for orchestration, local MLflow for experiment tracking, and a Python 3.11 Lambda behind an API Gateway HTTP API.
+This repository is an end-to-end, POC for weekly Visa card-adoption propensity scoring. It uses S3 as the data lake, dbt-duckdb for transformations, GitHub Actions for orchestration, local MLflow for experiment tracking, and a Python 3.11 Lambda behind an API Gateway HTTP API.
 
 ```mermaid
 flowchart LR
@@ -29,16 +29,7 @@ flowchart LR
 - Campaign segments (`TARGET_PREMIUM`, `TARGET_STANDARD`, `NURTURE`, `EXCLUDE`) written to S3.
 - Terraform for an encrypted versioned S3 bucket, restricted GitHub OIDC role, Lambda, HTTP API, CloudWatch error alarm, and SNS email subscription.
 
-## Cost target
 
-| Component | POC usage | Expected monthly cost |
-| --- | --- | --- |
-| S3 Standard / Glacier | Under the 5 GB free-tier target; older Parquet transitions at day 90 | $0–2 |
-| GitHub Actions | One weekly run, typically well below 2,000 free minutes | $0 |
-| ECR | Up to ten retained Lambda API images | $0–1 |
-| Lambda + HTTP API | Low-volume POC, under free requests/compute allowances | $0 |
-| CloudWatch + SNS | One basic alarm and occasional notification | $0–1 |
-| **Total** | | **$0–5/month** |
 
 AWS free-tier eligibility, region, outbound transfer, and GitHub plan determine the final bill. Set a billing alert before deploying.
 
@@ -145,8 +136,6 @@ Example response:
 ## Monitoring and operations
 
 The workflow runs Sunday at 03:00 UTC and also supports `workflow_dispatch`. Pipeline failures stop dependent jobs and the final job posts status to Slack when `SLACK_WEBHOOK_URL` exists. Lambda `Errors > 0` over five minutes raises the `visa-propensity-lambda-errors` CloudWatch alarm and publishes to SNS.
-
-CloudWatch alarm screenshot placeholder: capture the alarm in the AWS Console after the SNS subscription is confirmed and attach it to your operational runbook.
 
 Useful commands:
 
