@@ -13,7 +13,9 @@ env:
   AWS_REGION: us-east-1
   S3_BUCKET: ${{ secrets.S3_BUCKET }}
   ECR_REPOSITORY_URL: ${{ secrets.ECR_REPOSITORY_URL }}
-  MLFLOW_TRACKING_URI: ./mlruns
+  # MLflow 3.x no longer updates the filesystem store. SQLite retains the
+  # tracking metadata while MLflow writes model-card artifacts to mlartifacts/.
+  MLFLOW_TRACKING_URI: sqlite:///mlflow.db
 
 jobs:
   ingest:
@@ -69,8 +71,12 @@ jobs:
           cache-dependency-path: requirements.txt
       - uses: actions/cache@v4
         with:
-          path: mlruns
+          path: |
+            mlflow.db
+            mlartifacts
           key: mlflow-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            mlflow-${{ runner.os }}-
       - uses: actions/cache@v4
         with:
           path: .model-cache

@@ -83,6 +83,16 @@ make run-pipeline
 
 The complete local pipeline runs, in order: ingestion, dbt bronze-to-features build, training, scoring, then the post-score campaign mart build. Every writer uses an idempotent path based on `RUN_DATE`; rerun a historic date with `RUN_DATE=2026-08-04 make run-pipeline`.
 
+### Review MLflow metrics locally
+
+Training records parameters, evaluation metrics, the fitted model, and the model card in the supported SQLite MLflow store (`mlflow.db`) with artifacts in `mlartifacts/`. After a local training run, start the dashboard with:
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 5000
+```
+
+Open `http://127.0.0.1:5000`, then select the `visa_card_adoption` experiment. The GitHub Actions training job restores the latest tracked run and saves the updated database and artifacts in its MLflow cache.
+
 Raw, dbt, and scoring outputs use `year=YYYY/month=MM/day=DD` Hive partitions. The canonical weekly score location is:
 
 ```text

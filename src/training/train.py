@@ -146,7 +146,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Historical feature prefix. Gold is required for the 60/30 temporal split.",
     )
     parser.add_argument("--label-prefix", default="raw/customer_labels/")
-    parser.add_argument("--mlflow-uri", default=os.environ.get("MLFLOW_TRACKING_URI", "./mlruns"))
+    parser.add_argument(
+        "--mlflow-uri",
+        default=os.environ.get("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"),
+    )
     return parser
 
 
