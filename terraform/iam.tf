@@ -15,9 +15,15 @@ data "aws_iam_policy_document" "github_oidc_assume_role" {
     }
 
     condition {
-      test     = "StringEquals"
+      # GitHub can issue either its standard repository subject or its
+      # ID-based subject when a custom OIDC subject template is enabled.
+      # Both patterns remain scoped to this repository and branch.
+      test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:ref:refs/heads/${var.github_branch}"]
+      values = [
+        "repo:${var.github_repository}:ref:refs/heads/${var.github_branch}",
+        "repo:${join("@*/", split("/", var.github_repository))}@*:ref:refs/heads/${var.github_branch}",
+      ]
     }
   }
 }
@@ -46,7 +52,7 @@ data "aws_iam_policy_document" "github_actions" {
   }
 
   statement {
-    sid = "ReadWriteOnlyPocBucketObjects"
+    sid    = "ReadWriteOnlyPocBucketObjects"
     effect = "Allow"
     actions = [
       "s3:GetObject",
@@ -65,14 +71,14 @@ data "aws_iam_policy_document" "github_actions" {
   }
 
   statement {
-    sid     = "GetEcrLoginToken"
-    effect  = "Allow"
-    actions = ["ecr:GetAuthorizationToken"]
+    sid       = "GetEcrLoginToken"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
   }
 
   statement {
-    sid = "PushOnlyPropensityApiImage"
+    sid    = "PushOnlyPropensityApiImage"
     effect = "Allow"
     actions = [
       "ecr:BatchCheckLayerAvailability",

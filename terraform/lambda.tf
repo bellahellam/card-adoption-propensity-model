@@ -49,31 +49,41 @@ resource "aws_ecr_repository_policy" "lambda_pull" {
 }
 
 resource "terraform_data" "bootstrap_image" {
-  triggers_replace = [local.lambda_image_tag]
-  depends_on       = [aws_ecr_repository.score]
-
   provisioner "local-exec" {
     command = <<-EOT
-      aws ecr get-login-password --region ${var.aws_region} | docker login --username AWS --password-stdin ${local.ecr_registry}
-      docker build --platform linux/amd64 --tag ${aws_ecr_repository.score.repository_url}:${local.lambda_image_tag} ${path.module}/../src/api
-      docker push ${aws_ecr_repository.score.repository_url}:${local.lambda_image_tag}
+      ECR_REPO="${aws_ecr_repository.score.repository_url}"
+      IMAGE_TAG="${local.lambda_image_tag}"
+
+      echo "Building $ECR_REPO:$IMAGE_TAG"
+
+      aws ecr get-login-password --region ${var.aws_region} | \
+        docker login --username AWS --password-stdin "$ECR_REPO"
+
+      docker buildx build \
+        --platform linux/amd64 \
+        --provenance=false \
+        --load \
+        --tag "$ECR_REPO:$IMAGE_TAG" \
+        ./../src/api
+
+      docker push "$ECR_REPO:$IMAGE_TAG"
     EOT
   }
 }
 
 resource "aws_lambda_function" "score" {
-  function_name    = local.lambda_name
-  description      = "Scores Visa card-adoption propensity from aggregate customer features."
-  role             = aws_iam_role.lambda.arn
-  package_type     = "Image"
-  image_uri        = "${aws_ecr_repository.score.repository_url}:${local.lambda_image_tag}"
-  memory_size      = 512
-  timeout          = 10
+  function_name = local.lambda_name
+  description   = "Scores Visa card-adoption propensity from aggregate customer features."
+  role          = aws_iam_role.lambda.arn
+  package_type  = "Image"
+  image_uri     = "${aws_ecr_repository.score.repository_url}:${local.lambda_image_tag}"
+  memory_size   = 512
+  timeout       = 10
 
   environment {
     variables = {
-      MODEL_BUCKET      = aws_s3_bucket.data_lake.bucket
-      MODEL_KEY         = "models/visa_card_adoption/model.pkl"
+      MODEL_BUCKET       = aws_s3_bucket.data_lake.bucket
+      MODEL_KEY          = "models/visa_card_adoption/model.pkl"
       BASE_ADOPTION_RATE = "0.03"
     }
   }
