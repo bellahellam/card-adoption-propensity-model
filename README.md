@@ -27,6 +27,7 @@ flowchart LR
 - Bronze, silver, gold, latest-feature, and post-score mart dbt models with tests and external Parquet materializations.
 - Temporal 60/30-day XGBoost training, isotonic calibration, PR-AUC/ROC-AUC/Precision@10%/Lift@10%/Brier evaluation, MLflow logging, and a model card.
 - Campaign segments (`TARGET_PREMIUM`, `TARGET_STANDARD`, `NURTURE`, `EXCLUDE`) written to S3.
+- Randomized control holdout, treatment/control assignment, and a causal lift scorecard (ATE, two-proportion z-test, confidence interval, minimum-detectable-effect power check, and optional CUPED variance reduction) that measures whether targeting actually caused incremental adoption.
 - Terraform for an encrypted versioned S3 bucket, restricted GitHub OIDC role, Lambda, HTTP API, CloudWatch error alarm, and SNS email subscription.
 
 
@@ -144,9 +145,25 @@ make generate-data
 make dbt-build
 make train
 make score
+make measure-lift
 make deploy-infra
 make deploy-api
 make test-api
+```
+
+## Digital lift measurement (control vs. treatment)
+
+A high propensity score predicts *who* is likely to adopt; it does not prove that a campaign *caused* the adoption. To close that gap the pipeline runs a randomized experiment:
+
+- The ingestion step assigns every customer to `treatment` or `control` with a deterministic hash of `customer_token` (a ~15% control holdout) and simulates a heterogeneous causal bump for treated customers, so the POC exercises a genuine counterfactual. Assignments land in `s3://$S3_BUCKET/experiments/assignments/`.
+- `src/experiment/assign.py` performs the same stratified holdout assignment for a real scored campaign (`make assign-holdout`).
+- `src/experiment/measure_lift.py` (`make measure-lift`) joins assignments to observed adoption outcomes and computes, overall and per segment: control vs. treatment conversion rates, the absolute Average Treatment Effect and relative lift, a two-proportion z-test with p-value and confidence interval, the minimum detectable effect for the realized sample, and an optional CUPED-adjusted lift using pre-period behavioral covariates. Results are logged to the `visa_campaign_lift` MLflow experiment and written to `s3://$S3_BUCKET/experiments/results/campaign_scorecard.json`.
+- `mart_experiment_results` exposes the customer-grain experiment fact table (assignment, segment, outcome) for ad-hoc SQL analysis.
+
+Run the Python unit tests for the assignment and statistics logic with:
+
+```bash
+pytest tests/test_experiment.py
 ```
 
 ## Production migration path

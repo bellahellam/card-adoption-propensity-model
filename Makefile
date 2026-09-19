@@ -1,10 +1,10 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
-.PHONY: help init generate-data dbt-build train score build-mart deploy-infra deploy-api test-api run-pipeline
+.PHONY: help init generate-data dbt-build train score build-mart assign-holdout measure-lift build-experiment-mart deploy-infra deploy-api test-api run-pipeline
 
 help:
-	@echo "Targets: init generate-data dbt-build train score deploy-infra deploy-api test-api run-pipeline"
+	@echo "Targets: init generate-data dbt-build train score assign-holdout measure-lift deploy-infra deploy-api test-api run-pipeline"
 
 init:
 	python -m pip install --upgrade pip
@@ -27,6 +27,15 @@ score:
 build-mart:
 	DBT_SELECTION="+mart_campaign_segments" ./scripts/run_dbt.sh
 
+assign-holdout:
+	python src/experiment/assign.py --score-date "$${RUN_DATE:-$$(date -u +%F)}"
+
+measure-lift:
+	python src/experiment/measure_lift.py --assignment-date "$${RUN_DATE:-$$(date -u +%F)}"
+
+build-experiment-mart:
+	DBT_SELECTION="+mart_experiment_results" ./scripts/run_dbt.sh
+
 deploy-infra:
 	terraform -chdir=terraform init
 	terraform -chdir=terraform apply
@@ -46,4 +55,6 @@ run-pipeline:
 	$(MAKE) train
 	$(MAKE) score
 	$(MAKE) build-mart
+	$(MAKE) measure-lift
+	$(MAKE) build-experiment-mart
 

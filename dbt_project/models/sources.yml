@@ -18,6 +18,13 @@ sources:
       - name: campaign_segments
         config:
           external_location: "read_parquet('s3://{{ env_var('S3_BUCKET') }}/scores/weekly/year=*/month=*/day=*/campaign_segments.parquet', hive_partitioning = true)"
+  - name: experiments
+    description: "Randomized treatment/control holdout assignments for campaign lift measurement."
+    tables:
+      - name: assignments
+        description: "Per-customer experiment group keyed on customer_token; the untreated control enables causal lift estimation."
+        config:
+          external_location: "read_parquet('s3://{{ env_var('S3_BUCKET') }}/experiments/assignments/year=*/month=*/day=*/experiment_assignments.parquet', hive_partitioning = true)"
 
 models:
   - name: bronze_transactions
@@ -84,3 +91,18 @@ models:
         data_tests:
           - accepted_values:
               values: [TARGET_PREMIUM, TARGET_STANDARD, NURTURE, EXCLUDE]
+  - name: mart_experiment_results
+    description: "Customer-grain experiment fact joining holdout assignment, segment, and observed adoption outcome."
+    columns:
+      - name: customer_token
+        data_tests: [not_null]
+      - name: experiment_group
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [treatment, control]
+      - name: adopted_card
+        data_tests:
+          - accepted_range:
+              min_value: 0
+              max_value: 1

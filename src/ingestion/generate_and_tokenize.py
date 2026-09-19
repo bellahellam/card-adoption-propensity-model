@@ -28,6 +28,12 @@ from botocore.exceptions import BotoCoreError, ClientError
 LOGGER = logging.getLogger(__name__)
 TOKEN_SALT = "visa_card_adoption_v1"
 POC_TOKEN_KEY = "visa-poc-token-key-not-for-production"
+# Fraction of the synthetic population held back as an untreated control group so
+# the downstream lift-measurement framework has a real counterfactual to compare.
+DEFAULT_CONTROL_FRACTION = 0.15
+# Baseline absolute adoption bump applied to treated customers. Heterogeneity is
+# layered on top of this so that persuadable and sure-thing cohorts both exist.
+BASE_TREATMENT_EFFECT = 0.04
 MCC_CODES = np.array(
     [4111, 4121, 4511, 4722, 4789, 5411, 5422, 5441, 5499, 5812, 5813, 5814, 6010, 6011, 6012, 6050, 6051, 5541, 5732, 7999],
     dtype=np.int32,
@@ -46,6 +52,17 @@ def stable_customer_token(pan: str, token_key: str) -> str:
     """Return the first 32 hexadecimal characters of a salted HMAC-SHA256 token."""
     payload = f"{TOKEN_SALT}:{pan}".encode("utf-8")
     return hmac.new(token_key.encode("utf-8"), payload, hashlib.sha256).hexdigest()[:32]
+
+
+def _treatment_hash_fraction(customer_token: str, campaign_id: str) -> float:
+    """Return a stable pseudo-random fraction in [0, 1) for holdout assignment.
+
+    This mirrors ``src/experiment/assign.py`` so the synthetic ingestion path and
+    the production assignment path use identical, reproducible group logic.
+    """
+    payload = f"{campaign_id}:{customer_token}".encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    return (int(digest[:8], 16) % 10_000) / 10_000
 
 
 def resolve_bucket(cli_bucket: str | None) -> str:
@@ -69,8 +86,13 @@ def build_synthetic_data(
     as_of_date: date,
     token_key: str,
     seed: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Create transactions and customer labels with a roughly 3% adoption rate."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Create transactions, labels, and experiment assignments.
+
+    The control group receives the baseline ~3% adoption rate; the treatment group
+    receives an additional heterogeneous causal bump, so the emitted data supports
+    an honest treatment-versus-control lift measurement downstream.
+    """
     if customer_count <= 0 or transaction_count <= 0 or history_days <= 0:
         raise ValueError("customer_count, transaction_count, and history_days must be positive.")
 
@@ -151,23 +173,55 @@ def build_synthetic_data(
         + 0.004 * tenures
     )
     baseline_logit = np.log(0.03 / 0.97) - float(propensity_signal.mean())
-    adoption_probability = sigmoid(baseline_logit + propensity_signal)
+    baseline_probability = sigmoid(baseline_logit + propensity_signal)
+
+    # Deterministic treatment/control assignment keyed on the token, mirroring the
+    # production experiment assignment so the POC exercises a real holdout design.
+    hash_fraction = np.array(
+        [_treatment_hash_fraction(token, batch_id) for token in tokens], dtype=float
+    )
+    is_treated = hash_fraction >= DEFAULT_CONTROL_FRACTION
+    experiment_group = np.where(is_treated, "treatment", "control")
+
+    # Heterogeneous causal effect: digitally engaged, mid-tenure customers are the
+    # most persuadable, while already-saturated customers gain little. This gives
+    # a genuine incremental lift for the framework to detect and, later, gives an
+    # uplift model a real signal to learn.
+    persuadability = np.clip(0.5 + 0.6 * digital_ratio - 0.004 * np.abs(tenures - 36), 0.0, 1.5)
+    individual_effect = BASE_TREATMENT_EFFECT * persuadability
+    treated_effect = np.where(is_treated, individual_effect, 0.0)
+    # Apply the effect on the probability scale and clip to a valid range.
+    adoption_probability = np.clip(baseline_probability + treated_effect, 0.0, 1.0)
     adopted_card = (rng.random(customer_count) < adoption_probability).astype(np.int8)
+
     labels = pd.DataFrame(
         {
             "customer_token": tokens,
             "adopted_card": adopted_card,
             "age": ages,
             "tenure_months": tenures,
+            "experiment_group": experiment_group,
+            "true_treatment_effect": treated_effect.astype(np.float32),
             "label_date": as_of_date - pd.Timedelta(days=1),
             "_ingestion_date": as_of_date,
             "_ingestion_timestamp": fixed_ingestion_timestamp,
             "_batch_id": batch_id,
         }
     )
+    assignments = pd.DataFrame(
+        {
+            "customer_token": tokens,
+            "campaign_id": batch_id,
+            "experiment_group": experiment_group,
+            "hash_fraction": hash_fraction.astype(np.float32),
+            "_ingestion_date": as_of_date,
+            "_ingestion_timestamp": fixed_ingestion_timestamp,
+            "_batch_id": batch_id,
+        }
+    )
 
-    # No raw PAN is retained in either returned dataframe or any S3 object.
-    return transactions, labels
+    # No raw PAN is retained in any returned dataframe or any S3 object.
+    return transactions, labels, assignments
 
 
 def put_parquet(
@@ -200,9 +254,14 @@ def hive_key(prefix: str, partition_date: date, filename: str) -> str:
 
 
 def write_datasets(
-    client: BaseClient, bucket: str, transactions: pd.DataFrame, labels: pd.DataFrame, as_of_date: date
+    client: BaseClient,
+    bucket: str,
+    transactions: pd.DataFrame,
+    labels: pd.DataFrame,
+    assignments: pd.DataFrame,
+    as_of_date: date,
 ) -> None:
-    """Persist daily transaction partitions and one label partition to S3."""
+    """Persist transaction, label, and experiment-assignment partitions to S3."""
     transaction_dates = pd.to_datetime(transactions["transaction_timestamp"]).dt.date
     for partition_date, partition in transactions.groupby(transaction_dates, sort=True):
         key = hive_key("raw/transactions", partition_date, "transactions.parquet")
@@ -212,6 +271,12 @@ def write_datasets(
     label_key = hive_key("raw/customer_labels", as_of_date, "customer_labels.parquet")
     put_parquet(client, bucket, label_key, labels)
     LOGGER.info("Wrote %s customer labels to s3://%s/%s", len(labels), bucket, label_key)
+
+    assignment_key = hive_key(
+        "experiments/assignments", as_of_date, "experiment_assignments.parquet"
+    )
+    put_parquet(client, bucket, assignment_key, assignments)
+    LOGGER.info("Wrote %s experiment assignments to s3://%s/%s", len(assignments), bucket, assignment_key)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -233,11 +298,19 @@ def main(arguments: Sequence[str] | None = None) -> None:
     bucket = resolve_bucket(args.bucket)
     token_key = os.environ.get("TOKEN_KEY") or POC_TOKEN_KEY
     seed = args.seed if args.seed is not None else int(args.run_date.strftime("%Y%m%d"))
-    transactions, labels = build_synthetic_data(
+    transactions, labels, assignments = build_synthetic_data(
         args.customers, args.transactions, args.history_days, args.run_date, token_key, seed
     )
     LOGGER.info("Synthetic adoption prevalence: %.2f%%", 100.0 * labels["adopted_card"].mean())
-    write_datasets(boto3.client("s3"), bucket, transactions, labels, args.run_date)
+    control_rate = labels.loc[labels["experiment_group"] == "control", "adopted_card"].mean()
+    treatment_rate = labels.loc[labels["experiment_group"] == "treatment", "adopted_card"].mean()
+    LOGGER.info(
+        "Simulated control adoption %.2f%% vs treatment %.2f%% (true lift %.2f pp)",
+        100.0 * control_rate,
+        100.0 * treatment_rate,
+        100.0 * (treatment_rate - control_rate),
+    )
+    write_datasets(boto3.client("s3"), bucket, transactions, labels, assignments, args.run_date)
 
 
 if __name__ == "__main__":

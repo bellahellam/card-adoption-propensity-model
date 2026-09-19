@@ -116,6 +116,10 @@ jobs:
         run: python src/scoring/batch_score.py --score-date "$(date -u +%F)"
       - name: Build post-scoring campaign mart
         run: RUN_DATE="$(date -u +%F)" DBT_SELECTION="+mart_campaign_segments" ./scripts/run_dbt.sh
+      - name: Measure campaign lift versus control holdout
+        run: python src/experiment/measure_lift.py --assignment-date "$(date -u +%F)"
+      - name: Build experiment results mart
+        run: RUN_DATE="$(date -u +%F)" DBT_SELECTION="+mart_experiment_results" ./scripts/run_dbt.sh
 
   deploy_api:
     needs: train
