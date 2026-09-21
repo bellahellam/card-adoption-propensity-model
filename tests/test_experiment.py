@@ -20,6 +20,7 @@ sys.path.insert(0, str(SRC))
 
 from experiment.assign import assign_holdout, _assignment_fraction  # noqa: E402
 from experiment.measure_lift import (  # noqa: E402
+    build_outcome_frame,
     cuped_adjusted_lift,
     evaluate_experiment,
     minimum_detectable_effect,
@@ -110,6 +111,48 @@ def test_cuped_reduces_variance_without_biasing_estimate():
     result = cuped_adjusted_lift(frame, "volume_30d")
     assert result is not None
     assert result["cuped_variance_reduction"] >= 0.0
+
+
+def test_build_outcome_frame_supplies_campaign_segment():
+    # Regression: assignments/labels carry no campaign_segment; it must come from
+    # scores (or default to ALL) so evaluate_experiment does not raise.
+    tokens = [f"tok_{i}" for i in range(100)]
+    assignments = pd.DataFrame(
+        {"customer_token": tokens, "experiment_group": ["treatment", "control"] * 50}
+    )
+    labels = pd.DataFrame({"customer_token": tokens, "adopted_card": [0, 1] * 50})
+
+    # Without scores, segment defaults to ALL and evaluation still runs.
+    outcome_no_scores = build_outcome_frame(assignments, labels)
+    assert "campaign_segment" in outcome_no_scores.columns
+    assert (outcome_no_scores["campaign_segment"] == "ALL").all()
+    evaluate_experiment(outcome_no_scores)  # must not raise
+
+    # With scores, the real segment is joined through.
+    scores = pd.DataFrame(
+        {"customer_token": tokens, "campaign_segment": ["TARGET_PREMIUM"] * 100}
+    )
+    outcome_with_scores = build_outcome_frame(assignments, labels, scores=scores)
+    assert set(outcome_with_scores["campaign_segment"].unique()) == {"TARGET_PREMIUM"}
+
+
+def test_build_outcome_frame_handles_duplicate_feature_partitions():
+    # features_transactional accumulates one row per token per weekly partition;
+    # the covariate merge must dedup rather than raise a many-to-one MergeError.
+    tokens = [f"tok_{i}" for i in range(50)]
+    assignments = pd.DataFrame(
+        {"customer_token": tokens, "experiment_group": ["treatment", "control"] * 25}
+    )
+    labels = pd.DataFrame({"customer_token": tokens, "adopted_card": [0, 1] * 25})
+    features = pd.concat(
+        [
+            pd.DataFrame({"customer_token": tokens, "volume_30d": 1.0, "txn_count_30d": 3}),
+            pd.DataFrame({"customer_token": tokens, "volume_30d": 2.0, "txn_count_30d": 5}),
+        ],
+        ignore_index=True,
+    )
+    outcome = build_outcome_frame(assignments, labels, features=features)
+    assert len(outcome) == len(tokens)
 
 
 def test_evaluate_experiment_end_to_end():

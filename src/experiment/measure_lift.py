@@ -269,9 +269,18 @@ def read_parquet_prefix(client: BaseClient, bucket: str, prefix: str) -> pd.Data
 
 
 def build_outcome_frame(
-    assignments: pd.DataFrame, labels: pd.DataFrame, features: pd.DataFrame | None
+    assignments: pd.DataFrame,
+    labels: pd.DataFrame,
+    scores: pd.DataFrame | None = None,
+    features: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Join assignments to observed outcomes and an optional CUPED covariate."""
+    """Join assignments to outcomes, campaign segment, and an optional covariate.
+
+    The ``campaign_segment`` needed for per-segment lift lives only in the campaign
+    scores; assignments and labels do not carry it. Segment is merged from
+    ``scores`` when available and defaults to ``ALL`` so the overall estimate still
+    computes when scores are absent.
+    """
     if "customer_token" not in assignments.columns:
         raise ValueError("Assignments must contain customer_token.")
     if not {"customer_token", "adopted_card"}.issubset(labels.columns):
@@ -280,6 +289,15 @@ def build_outcome_frame(
     label_frame = labels[["customer_token", "adopted_card"]].drop_duplicates("customer_token", keep="last")
     merged = assignments.merge(label_frame, on="customer_token", how="left", validate="many_to_one")
     merged["adopted_card"] = pd.to_numeric(merged["adopted_card"], errors="coerce").fillna(0).astype(int)
+
+    if scores is not None and {"customer_token", "campaign_segment"}.issubset(scores.columns):
+        segment_frame = scores[["customer_token", "campaign_segment"]].drop_duplicates(
+            "customer_token", keep="last"
+        )
+        merged = merged.merge(segment_frame, on="customer_token", how="left", validate="many_to_one")
+        merged["campaign_segment"] = merged["campaign_segment"].fillna("ALL")
+    else:
+        merged["campaign_segment"] = "ALL"
 
     if features is not None and "customer_token" in features.columns:
         covariate_columns = [c for c in ("volume_30d", "txn_count_30d") if c in features.columns]
@@ -386,15 +404,24 @@ def main(arguments: Sequence[str] | None = None) -> None:
     label_prefix = (
         f"raw/customer_labels/year={outcome_date:%Y}/month={outcome_date:%m}/day={outcome_date:%d}/"
     )
+    score_prefix = (
+        f"scores/weekly/year={args.assignment_date:%Y}/month={args.assignment_date:%m}/"
+        f"day={args.assignment_date:%d}/"
+    )
     assignments = read_parquet_prefix(client, bucket, assignment_prefix)
     labels = read_parquet_prefix(client, bucket, label_prefix)
+    try:
+        scores = read_parquet_prefix(client, bucket, score_prefix)
+    except FileNotFoundError:
+        LOGGER.warning("No campaign scores found; reporting overall lift only.")
+        scores = None
     try:
         features = read_parquet_prefix(client, bucket, "dbt/features/features_transactional/")
     except FileNotFoundError:
         LOGGER.warning("No feature snapshot found for CUPED; proceeding without variance reduction.")
         features = None
 
-    outcomes = build_outcome_frame(assignments, labels, features)
+    outcomes = build_outcome_frame(assignments, labels, scores=scores, features=features)
     scorecard = evaluate_experiment(outcomes, alpha=args.alpha)
     scorecard["campaign_id"] = campaign_id
     scorecard["assignment_date"] = args.assignment_date.isoformat()
