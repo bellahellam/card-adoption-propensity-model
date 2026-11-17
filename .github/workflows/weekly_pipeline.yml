@@ -134,7 +134,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
       - name: Build and publish the Python 3.11 Lambda image
         run: |
-          docker build --platform linux/amd64 --tag "${ECR_REPOSITORY_URL}:${GITHUB_SHA}" src/api
+          docker buildx build --platform linux/amd64 --provenance=false --load --tag "${ECR_REPOSITORY_URL}:${GITHUB_SHA}" src/api
           docker push "${ECR_REPOSITORY_URL}:${GITHUB_SHA}"
       - name: Update the Lambda to refresh its S3-backed model on new containers
         run: aws lambda update-function-code --function-name visa-card-propensity-score --image-uri "${ECR_REPOSITORY_URL}:${GITHUB_SHA}" --publish
